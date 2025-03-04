@@ -108,6 +108,10 @@ MultiExecHash(HashState *node)
 	if (node->ps.instrument)
 		InstrStartNode(node->ps.instrument);
 
+  /* create bloom filter */
+	BloomFilter bf = bloom_filter_init();
+	node->bloomfilter = bf;
+
 	if (node->parallel_state != NULL)
 		MultiExecParallelHash(node);
 	else
@@ -173,6 +177,10 @@ MultiExecPrivateHash(HashState *node)
 		{
 			int			bucketNumber;
 
+			/* BEGIN NEWCODE */
+			// Insert into bloom filter
+			bloom_filter_set(&node->bloomfilter, hashvalue);
+			/* END NEWCODE */
 			bucketNumber = ExecHashGetSkewBucket(hashtable, hashvalue);
 			if (bucketNumber != INVALID_SKEW_BUCKET_NO)
 			{
@@ -286,7 +294,11 @@ MultiExecParallelHash(HashState *node)
 				if (ExecHashGetHashValue(hashtable, econtext, hashkeys,
 										 false, hashtable->keepNulls,
 										 &hashvalue))
-					ExecParallelHashTableInsert(hashtable, slot, hashvalue);
+										 {
+											ExecParallelHashTableInsert(hashtable, slot, hashvalue);
+											bloom_filter_set(&node->bloomfilter, hashvalue);
+										 }
+					
 				hashtable->partialTuples++;
 			}
 

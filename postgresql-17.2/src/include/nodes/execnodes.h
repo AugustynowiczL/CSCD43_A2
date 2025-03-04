@@ -71,6 +71,12 @@ typedef Datum (*ExprStateEvalFunc) (struct ExprState *expression,
 									struct ExprContext *econtext,
 									bool *isNull);
 
+/* Define size of bloom filter array in bytes and number of functions */
+/* BEGIN NEWCODE */
+#define BLOOM_FILTER_BYTES 1000
+#define BLOOM_FILTER_FUNCTIONS 5
+/* END NEWCODE */
+
 /* Bits in ExprState->flags (see also execExpr.h for private flag bits): */
 /* expression is for use with ExecQual() */
 #define EEO_FLAG_IS_QUAL					(1 << 0)
@@ -2739,6 +2745,126 @@ typedef struct SharedHashInfo
 	HashInstrumentation hinstrument[FLEXIBLE_ARRAY_MEMBER];
 } SharedHashInfo;
 
+/* --------------
+ *	Bloom filter structure for the hashjoin 
+ * --------------
+ */
+
+/* BEGIN NEWCODE*/
+typedef struct BloomFilter
+{
+	int 		num_bits;	/* number of bits in bitmap */
+	unsigned int filter[BLOOM_FILTER_BYTES]; /* bitmap */
+	int			total_tries; /* total number of valid hits */
+	int			total_hits;	/* total number of times the bloom filter is used */
+	int 		(*hash_functions[BLOOM_FILTER_FUNCTIONS]) (uint32_t	value);/* Array holding all hash functions */
+} BloomFilter;
+
+/* Bloom filter methods  SOURCE: https://www.cs.hmc.edu/~geoff/classes/hmc.cs070.200401/homework10/hashfuncs.html*/
+BloomFilter bloom_filter_init() 
+{
+	BloomFilter bf;
+	bf.num_bits = BLOOM_FILTER_BYTES * 32;
+	bf.total_tries = 0;
+	bf.total_hits = 0;
+
+	for (int i = 0; i < BLOOM_FILTER_BYTES; i++)
+	{
+		bf.filter[i] = 0;
+	}
+
+	bf.hash_functions[0] = bloom_hashfunc_1;
+	bf.hash_functions[1] = bloom_hashfunc_2;
+	bf.hash_functions[2] = bloom_hashfunc_3;
+	bf.hash_functions[3] = bloom_hashfunc_4;
+	bf.hash_functions[4] = bloom_hashfunc_5;
+
+	return bf;
+}
+
+void bloom_filter_set(BloomFilter *bf, uint32_t value)
+{
+	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
+	{
+		int hash = bf->hash_functions[i](value);
+		hash = hash % bf->num_bits;
+		bf->filter[hash/32] |= (1U << hash % 32);
+	}
+}
+
+int bloom_filter_get(BloomFilter *bf, uint32_t value)
+{
+	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
+	{
+		int hash = bf->hash_functions[i](value);
+		hash = hash % bf->num_bits;
+		if ((bf->filter[hash/32] & (1U << hash % 32)) == 0)
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+
+int bloom_hashfunc_1(BloomFilter *bf, uint32_t a)
+{
+    a = (a+0x7ed55d16) + (a<<12);
+    a = (a^0xc761c23c) ^ (a>>19);
+    a = (a+0x165667b1) + (a<<5);
+    a = (a+0xd3a2646c) ^ (a<<9);
+    a = (a+0xfd7046c5) + (a<<3);
+    a = (a^0xb55a4f09) ^ (a>>16);
+    return a % bf->num_bits;
+}
+
+int bloom_hashfunc_2(BloomFilter* bf, uint32_t h)
+{
+	uint32_t highorder;
+	highorder = h & 0xf8000000;   // extract high-order 5 bits from h
+		// 0xf8000000 is the hexadecimal representation
+		//   for the 32-bit number with the first five 
+		//   bits = 1 and the other bits = 0   
+	h = h << 5;                   // shift h left by 5 bits
+	h = h ^ (highorder >> 27);    // move the highorder 5 bits to the low-order
+		//   end and XOR into h
+	h = h ^ 0x7ed55d16;                   // XOR h and ki
+	return h % bf->num_bits;
+}
+
+int bloom_hashfunc_3(BloomFilter* bf, uint32_t h)
+{
+  // The top 4 bits of h are all zero
+	uint32_t g;
+	h = (h << 4) + 0x7ed55d16;               // shift h 4 bits left, add in ki
+	g = h & 0xf0000000;              // get the top 4 bits of h
+	if (g != 0)  {                   // if the top 4 bits aren't zero,
+		 h = h ^ (g >> 24);            //   move them to the low end of h
+		 h = h ^ g;  
+	}
+	return h % bf->num_bits;                  
+	// The top 4 bits of h are again all zero
+}
+
+int bloom_hashfunc_4(BloomFilter* bf, uint32 h)
+{
+	uint32_t highorder;
+	highorder = h & 0x80000000;    // extract high-order bit from h
+	h = h << 1;                    // shift h left by 1 bit
+	h = h ^ (highorder >> 31);     // move them to the low-order end and
+																// XOR into h
+	h = h ^ 0x7ed55d16;                 // XOR h and the random value for ki
+	return h % bf->num_bits;
+}
+
+int bloom_hashfunc_5(BloomFilter* bf, uint32 x)
+{
+	x = ((x >> 16) ^ x) * 0x45d9f3b;
+	x = ((x >> 16) ^ x) * 0x45d9f3b;
+	x = (x >> 16) ^ x;
+	return x % bf->num_bits;
+}
+/* END NEW CODE	*/
+
 /* ----------------
  *	 HashState information
  * ----------------
@@ -2747,6 +2873,9 @@ typedef struct HashState
 {
 	PlanState	ps;				/* its first field is NodeTag */
 	HashJoinTable hashtable;	/* hash table for the hashjoin */
+	/* BEGIN NEWCODE */
+	BloomFilter bloomfilter; /* bloom filter for the hashjoin */
+	/* END NEWCODE*/
 	List	   *hashkeys;		/* list of ExprState nodes */
 
 	/*
