@@ -80,6 +80,115 @@ static bool ExecParallelHashTuplePrealloc(HashJoinTable hashtable,
 static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
+/*
+ Bloom Filter for Join 
+ BEGIN NEW CODE
+*/
+int bloom_hashfunc_1(CustomBloomFilter *bf, uint32_t a)
+{
+    a = (a+0x7ed55d16) + (a<<12);
+    a = (a^0xc761c23c) ^ (a>>19);
+    a = (a+0x165667b1) + (a<<5);
+    a = (a+0xd3a2646c) ^ (a<<9);
+    a = (a+0xfd7046c5) + (a<<3);
+    a = (a^0xb55a4f09) ^ (a>>16);
+    return a % bf->num_bits;
+}
+
+int bloom_hashfunc_2(CustomBloomFilter* bf, uint32_t h)
+{
+	uint32_t highorder;
+	highorder = h & 0xf8000000;   // extract high-order 5 bits from h
+		// 0xf8000000 is the hexadecimal representation
+		//   for the 32-bit number with the first five 
+		//   bits = 1 and the other bits = 0   
+	h = h << 5;                   // shift h left by 5 bits
+	h = h ^ (highorder >> 27);    // move the highorder 5 bits to the low-order
+		//   end and XOR into h
+	h = h ^ 0x7ed55d16;                   // XOR h and ki
+	return h % bf->num_bits;
+}
+
+int bloom_hashfunc_3(CustomBloomFilter* bf, uint32_t h)
+{
+  // The top 4 bits of h are all zero
+	uint32_t g;
+	h = (h << 4) + 0x7ed55d16;               // shift h 4 bits left, add in ki
+	g = h & 0xf0000000;              // get the top 4 bits of h
+	if (g != 0)  {                   // if the top 4 bits aren't zero,
+		 h = h ^ (g >> 24);            //   move them to the low end of h
+		 h = h ^ g;  
+	}
+	return h % bf->num_bits;                  
+	// The top 4 bits of h are again all zero
+}
+
+int bloom_hashfunc_4(CustomBloomFilter* bf, uint32 h)
+{
+	uint32_t highorder;
+	highorder = h & 0x80000000;    // extract high-order bit from h
+	h = h << 1;                    // shift h left by 1 bit
+	h = h ^ (highorder >> 31);     // move them to the low-order end and
+																// XOR into h
+	h = h ^ 0x7ed55d16;                 // XOR h and the random value for ki
+	return h % bf->num_bits;
+}
+
+int bloom_hashfunc_5(CustomBloomFilter* bf, uint32 x)
+{
+	x = ((x >> 16) ^ x) * 0x45d9f3b;
+	x = ((x >> 16) ^ x) * 0x45d9f3b;
+	x = (x >> 16) ^ x;
+	return x % bf->num_bits;
+}
+
+/* Bloom filter methods  SOURCE: https://www.cs.hmc.edu/~geoff/classes/hmc.cs070.200401/homework10/hashfuncs.html*/
+CustomBloomFilter bloom_filter_init() 
+{
+	CustomBloomFilter bf;
+	bf.num_bits = BLOOM_FILTER_BYTES * 32;
+	bf.total_tries = 0;
+	bf.total_hits = 0;
+
+	for (int i = 0; i < BLOOM_FILTER_BYTES; i++)
+	{
+		bf.filter[i] = 0;
+	}
+
+	bf.hash_functions[0] = bloom_hashfunc_1;
+	bf.hash_functions[1] = bloom_hashfunc_2;
+	bf.hash_functions[2] = bloom_hashfunc_3;
+	bf.hash_functions[3] = bloom_hashfunc_4;
+	bf.hash_functions[4] = bloom_hashfunc_5;
+
+	return bf;
+}
+
+void bloom_filter_set(CustomBloomFilter *bf, uint32_t value)
+{
+	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
+	{
+		int hash = bf->hash_functions[i](bf, value);
+		hash = hash % bf->num_bits;
+		bf->filter[hash/32] |= (1U << hash % 32);
+	}
+}
+
+int bloom_filter_get(CustomBloomFilter *bf, uint32_t value)
+{
+	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
+	{
+		int hash = bf->hash_functions[i](bf, value);
+		hash = hash % bf->num_bits;
+		if ((bf->filter[hash/32] & (1U << hash % 32)) == 0)
+		{
+			return 0;
+		}
+	}
+	return 1;
+}
+/* END NEWCODE*/
+
 
 /* ----------------------------------------------------------------
  *		ExecHash
@@ -109,7 +218,7 @@ MultiExecHash(HashState *node)
 		InstrStartNode(node->ps.instrument);
 
   /* create bloom filter */
-	BloomFilter bf = bloom_filter_init();
+	CustomBloomFilter bf = bloom_filter_init();
 	node->bloomfilter = bf;
 
 	if (node->parallel_state != NULL)
@@ -147,6 +256,7 @@ MultiExecPrivateHash(HashState *node)
 	TupleTableSlot *slot;
 	ExprContext *econtext;
 	uint32		hashvalue;
+	uint32    join_key;
 
 	/*
 	 * get state info from node
@@ -171,16 +281,27 @@ MultiExecPrivateHash(HashState *node)
 			break;
 		/* We have to compute the hash value */
 		econtext->ecxt_outertuple = slot;
+		/* BEGIN NEWCODE
+			INSERT INTO BLOOM FILTER */
+		ListCell* hk;
+		foreach(hk, hashkeys)
+		{
+			ExprState  *keyexpr = (ExprState *) lfirst(hk);
+			Datum		keyval;
+			bool		isNull;
+			/*
+				* Get the join attribute value of the tuple
+				*/
+			keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
+			if (!isNull) join_key = DatumGetInt32(keyval);
+			bloom_filter_set(&node->bloomfilter, join_key);
+		}
+		/* END NEWCODE*/
 		if (ExecHashGetHashValue(hashtable, econtext, hashkeys,
 								 false, hashtable->keepNulls,
 								 &hashvalue))
 		{
 			int			bucketNumber;
-
-			/* BEGIN NEWCODE */
-			// Insert into bloom filter
-			bloom_filter_set(&node->bloomfilter, hashvalue);
-			/* END NEWCODE */
 			bucketNumber = ExecHashGetSkewBucket(hashtable, hashvalue);
 			if (bucketNumber != INVALID_SKEW_BUCKET_NO)
 			{
@@ -229,6 +350,7 @@ MultiExecParallelHash(HashState *node)
 	ExprContext *econtext;
 	uint32		hashvalue;
 	Barrier    *build_barrier;
+	uint32_t join_key;
 	int			i;
 
 	/*
@@ -291,12 +413,27 @@ MultiExecParallelHash(HashState *node)
 				if (TupIsNull(slot))
 					break;
 				econtext->ecxt_outertuple = slot;
+				/* BEGIN NEWCODE
+				INSERT INTO BLOOM FILTER */
+				ListCell* hk;
+				foreach(hk, hashkeys)
+				{
+					ExprState  *keyexpr = (ExprState *) lfirst(hk);
+					Datum		keyval;
+					bool		isNull;
+					/*
+						* Get the join attribute value of the tuple
+						*/
+					keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
+					if (!isNull) join_key = DatumGetInt32(keyval);
+					bloom_filter_set(&node->bloomfilter, join_key);
+				}
+				/* END NEWCODE*/
 				if (ExecHashGetHashValue(hashtable, econtext, hashkeys,
 										 false, hashtable->keepNulls,
 										 &hashvalue))
 										 {
 											ExecParallelHashTableInsert(hashtable, slot, hashvalue);
-											bloom_filter_set(&node->bloomfilter, hashvalue);
 										 }
 					
 				hashtable->partialTuples++;
@@ -1987,6 +2124,7 @@ ExecScanHashBucket(HashJoinState *hjstate,
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
+	uint32_t join_key;
 
 	/*
 	 * hj_CurTuple is the address of the tuple last returned from the current
@@ -2004,7 +2142,21 @@ ExecScanHashBucket(HashJoinState *hjstate,
 
 	while (hashTuple != NULL)
 	{
-		if (hashTuple->hashvalue == hashvalue)
+		/* BEGIN NEWCODE */
+		// Check bloom filter
+		HashState  *hashstate = (HashState *) innerPlanState(hjstate);
+		Datum		keyval;
+		bool		isNull;
+		/*
+			* Get the join attribute value of the tuple
+			*/
+		keyval = ExecEvalExpr(hjclauses, econtext, &isNull);
+		if (!isNull) join_key = DatumGetInt32(keyval);
+		int s = bloom_filter_get(&hashstate->bloomfilter, join_key);
+
+		hashstate->bloomfilter.total_tries++;
+		if (s == 1 && hashTuple->hashvalue == hashvalue)
+		/* END NEWCODE*/
 		{
 			TupleTableSlot *inntuple;
 
@@ -2019,6 +2171,7 @@ ExecScanHashBucket(HashJoinState *hjstate,
 				hjstate->hj_CurTuple = hashTuple;
 				return true;
 			}
+			hashstate->bloomfilter.total_hits++;
 		}
 
 		hashTuple = hashTuple->next.unshared;
@@ -2048,6 +2201,7 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
+	uint32_t join_key;
 
 	/*
 	 * hj_CurTuple is the address of the tuple last returned from the current
@@ -2061,7 +2215,21 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 
 	while (hashTuple != NULL)
 	{
-		if (hashTuple->hashvalue == hashvalue)
+		/* BEGIN NEWCODE */
+		// Check bloom filter
+		HashState  *hashstate = (HashState *) innerPlanState(hjstate);
+		Datum		keyval;
+		bool		isNull;
+		/*
+			* Get the join attribute value of the tuple
+			*/
+		keyval = ExecEvalExpr(hjclauses, econtext, &isNull);
+		if (!isNull) join_key = DatumGetInt32(keyval);
+		int s = bloom_filter_get(&hashstate->bloomfilter, join_key);
+
+		hashstate->bloomfilter.total_tries++;
+		if (s == 1 && hashTuple->hashvalue == hashvalue)
+		/* END NEWCODE*/
 		{
 			TupleTableSlot *inntuple;
 
@@ -2076,6 +2244,7 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 				hjstate->hj_CurTuple = hashTuple;
 				return true;
 			}
+			hashstate->bloomfilter.total_hits++;
 		}
 
 		hashTuple = ExecParallelHashNextTuple(hashtable, hashTuple);
