@@ -82,104 +82,103 @@ static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
 
 /*
  Bloom Filter for Join 
- BEGIN NEW CODE
-*/
-int bloom_hashfunc_1(CustomBloomFilter *bf, uint32_t a)
+ BEGIN NEW CODE 
+ */
+int bloom_hashfunc_1(CustomBloomFilter *bf, uint32_t input) //DJB2 hash
 {
-    a = (a+0x7ed55d16) + (a<<12);
-    a = (a^0xc761c23c) ^ (a>>19);
-    a = (a+0x165667b1) + (a<<5);
-    a = (a+0xd3a2646c) ^ (a<<9);
-    a = (a+0xfd7046c5) + (a<<3);
-    a = (a^0xb55a4f09) ^ (a>>16);
-    return a % bf->num_bits;
+	uint32_t hash = 5381;
+	hash = ((hash << 5) + hash) + (input & 0xFF);  // Combine the input as a byte
+	hash = ((hash << 5) + hash) + ((input >> 8) & 0xFF); // Handle the next byte
+	return hash % bf->num_bits;
 }
 
-int bloom_hashfunc_2(CustomBloomFilter* bf, uint32_t h)
+int bloom_hashfunc_2(CustomBloomFilter* bf, uint32_t input) // FNV-1a hash
 {
-	uint32_t highorder;
-	highorder = h & 0xf8000000;   // extract high-order 5 bits from h
-		// 0xf8000000 is the hexadecimal representation
-		//   for the 32-bit number with the first five 
-		//   bits = 1 and the other bits = 0   
-	h = h << 5;                   // shift h left by 5 bits
-	h = h ^ (highorder >> 27);    // move the highorder 5 bits to the low-order
-		//   end and XOR into h
-	h = h ^ 0x7ed55d16;                   // XOR h and ki
-	return h % bf->num_bits;
+	uint32_t hash = 0x811c9dc5;  // FNV-1a offset basis
+	hash ^= (input & 0xFF);      // Process the lowest byte
+	hash *= 0x01000193;          // FNV-1a prime
+	hash ^= ((input >> 8) & 0xFF); // Process the second byte
+	hash *= 0x01000193;
+	hash ^= ((input >> 16) & 0xFF); // Process the third byte
+	hash *= 0x01000193;
+	hash ^= ((input >> 24) & 0xFF); // Process the highest byte
+	hash *= 0x01000193;
+	return hash % bf->num_bits;
 }
 
-int bloom_hashfunc_3(CustomBloomFilter* bf, uint32_t h)
+int bloom_hashfunc_3(CustomBloomFilter* bf, uint32_t input) //XOR SHIFT hash
 {
-  // The top 4 bits of h are all zero
-	uint32_t g;
-	h = (h << 4) + 0x7ed55d16;               // shift h 4 bits left, add in ki
-	g = h & 0xf0000000;              // get the top 4 bits of h
-	if (g != 0)  {                   // if the top 4 bits aren't zero,
-		 h = h ^ (g >> 24);            //   move them to the low end of h
-		 h = h ^ g;  
-	}
-	return h % bf->num_bits;                  
-	// The top 4 bits of h are again all zero
+	input ^= input >> 21;
+	input ^= input << 35;
+	input ^= input >> 4;
+	input *= 2685821657736338717ULL;  // A large prime constant
+	input ^= input >> 15;
+	return input % bf->num_bits;
 }
 
-int bloom_hashfunc_4(CustomBloomFilter* bf, uint32 h)
+int bloom_hashfunc_4(CustomBloomFilter* bf, uint32 input) //rotate xor hash
 {
-	uint32_t highorder;
-	highorder = h & 0x80000000;    // extract high-order bit from h
-	h = h << 1;                    // shift h left by 1 bit
-	h = h ^ (highorder >> 31);     // move them to the low-order end and
-																// XOR into h
-	h = h ^ 0x7ed55d16;                 // XOR h and the random value for ki
-	return h % bf->num_bits;
+	uint32_t hash = input;
+	hash ^= (hash >> 16);
+	hash *= 0x45d9f3b;  // A constant multiplier
+	hash ^= (hash >> 16);
+	return hash % bf->num_bits;
 }
 
-int bloom_hashfunc_5(CustomBloomFilter* bf, uint32 x)
-{
-	x = ((x >> 16) ^ x) * 0x45d9f3b;
-	x = ((x >> 16) ^ x) * 0x45d9f3b;
-	x = (x >> 16) ^ x;
-	return x % bf->num_bits;
-}
-
-/* Bloom filter methods  SOURCE: https://www.cs.hmc.edu/~geoff/classes/hmc.cs070.200401/homework10/hashfuncs.html*/
-CustomBloomFilter bloom_filter_init() 
+CustomBloomFilter bloom_filter_init(HashState* node) 
 {
 	CustomBloomFilter bf;
-	bf.num_bits = BLOOM_FILTER_BYTES * 32;
+	int bytes = ((((int)node->ps.plan->plan_rows) * BLOOM_FILTER_FUNCTIONS)/0.7) / 8;
+	int arr_size = bytes / 4;
+	bf.num_bits = arr_size * 32;
+	bf.filter = (unsigned int *)malloc(arr_size * sizeof(unsigned int));
+	if (bf.filter == NULL)
+	{
+		printf("BF Memory allocation failed\n");
+		exit(1);
+	}
+	printf("Initializaing bf with: %d\n", bf.num_bits);
 	bf.total_tries = 0;
 	bf.total_hits = 0;
 
-	for (int i = 0; i < BLOOM_FILTER_BYTES; i++)
+	for (int i = 0; i < arr_size; i++)
 	{
 		bf.filter[i] = 0;
 	}
-
 	bf.hash_functions[0] = bloom_hashfunc_1;
 	bf.hash_functions[1] = bloom_hashfunc_2;
 	bf.hash_functions[2] = bloom_hashfunc_3;
 	bf.hash_functions[3] = bloom_hashfunc_4;
-	bf.hash_functions[4] = bloom_hashfunc_5;
 
 	return bf;
 }
-
+/* Free bf structure */
+void free_custom_bloom_filter(CustomBloomFilter *bf)
+{
+	free(bf->filter);
+	bf->filter = NULL;
+}
+/* Set bit value*/
 void bloom_filter_set(CustomBloomFilter *bf, uint32_t value)
 {
 	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
 	{
 		int hash = bf->hash_functions[i](bf, value);
 		hash = hash % bf->num_bits;
+		/* hash /32 gets specific integer region*/
+		/* 1U << hash % 32 gets specific bit in 32 bit integer region*/
 		bf->filter[hash/32] |= (1U << hash % 32);
 	}
 }
-
+/* Get bit value*/
 int bloom_filter_get(CustomBloomFilter *bf, uint32_t value)
 {
 	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
 	{
 		int hash = bf->hash_functions[i](bf, value);
 		hash = hash % bf->num_bits;
+		/* hash /32 gets specific integer region*/
+		/* 1U << hash % 32 gets specific bit in 32 bit integer region*/
 		if ((bf->filter[hash/32] & (1U << hash % 32)) == 0)
 		{
 			return 0;
@@ -217,9 +216,11 @@ MultiExecHash(HashState *node)
 	if (node->ps.instrument)
 		InstrStartNode(node->ps.instrument);
 
-  /* create bloom filter */
-	CustomBloomFilter bf = bloom_filter_init();
+  /* BEGIN NEWCODE 
+	create bloom filter */
+	CustomBloomFilter bf = bloom_filter_init(node);
 	node->bloomfilter = bf;
+	/* END NEWCODE*/
 
 	if (node->parallel_state != NULL)
 		MultiExecParallelHash(node);
@@ -284,16 +285,18 @@ MultiExecPrivateHash(HashState *node)
 		/* BEGIN NEWCODE
 			INSERT INTO BLOOM FILTER */
 		ListCell* hk;
+		/* Loop over hash keys*/
 		foreach(hk, hashkeys)
 		{
 			ExprState  *keyexpr = (ExprState *) lfirst(hk);
 			Datum		keyval;
 			bool		isNull;
 			/*
-				* Get the join attribute value of the tuple
+				* Get the join attribute value of the tuple from econtext
 				*/
 			keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
 			if (!isNull) join_key = DatumGetInt32(keyval);
+			/* set bloom filter value*/
 			bloom_filter_set(&node->bloomfilter, join_key);
 		}
 		/* END NEWCODE*/
@@ -416,16 +419,18 @@ MultiExecParallelHash(HashState *node)
 				/* BEGIN NEWCODE
 				INSERT INTO BLOOM FILTER */
 				ListCell* hk;
+				// loop over hash keys
 				foreach(hk, hashkeys)
 				{
 					ExprState  *keyexpr = (ExprState *) lfirst(hk);
 					Datum		keyval;
 					bool		isNull;
 					/*
-						* Get the join attribute value of the tuple
+						* Get the join attribute value of the tuple from econtext
 						*/
 					keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
 					if (!isNull) join_key = DatumGetInt32(keyval);
+					//set hash key
 					bloom_filter_set(&node->bloomfilter, join_key);
 				}
 				/* END NEWCODE*/
@@ -2124,8 +2129,41 @@ ExecScanHashBucket(HashJoinState *hjstate,
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
+	/* BEGIN NEWCODE */
+	/* Check if the current outer tuple exist in bloom filter*/
+	HashState  *hashstate = (HashState *) innerPlanState(hjstate);
+	hashstate->bloomfilter.total_tries = (hashstate->bloomfilter.total_tries) + 1; //Increment bloom filter use by one, used for false positive
+	List *hashkeys = hashstate->hashkeys;
+	ListCell* hk;
 	uint32_t join_key;
+	/* Not exactly sure about this context, but similar to what is done when building hash table */
+	MemoryContext oldContext;
+	ResetExprContext(econtext);
+	oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+	foreach(hk, hashkeys)
+	//loop over hash keys
+	{
+		ExprState  *keyexpr = (ExprState *) lfirst(hk);
+		Datum		keyval;
+		bool		isNull;
+		/*
+			* Get the join attribute value of the tuple from econtext
+			*/
+		keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
+		if (!isNull) 
+		{
+			join_key = DatumGetInt32(keyval);
+			//Filter returned 0, will never match
+			if(bloom_filter_get(&hashstate->bloomfilter, join_key) == 0)
+			{
 
+				MemoryContextSwitchTo(oldContext);
+				return false; 
+			}
+		}
+	}
+	/* END NEWCODE*/
+	MemoryContextSwitchTo(oldContext);
 	/*
 	 * hj_CurTuple is the address of the tuple last returned from the current
 	 * bucket, or NULL if it's time to start scanning a new bucket.
@@ -2142,21 +2180,7 @@ ExecScanHashBucket(HashJoinState *hjstate,
 
 	while (hashTuple != NULL)
 	{
-		/* BEGIN NEWCODE */
-		// Check bloom filter
-		HashState  *hashstate = (HashState *) innerPlanState(hjstate);
-		Datum		keyval;
-		bool		isNull;
-		/*
-			* Get the join attribute value of the tuple
-			*/
-		keyval = ExecEvalExpr(hjclauses, econtext, &isNull);
-		if (!isNull) join_key = DatumGetInt32(keyval);
-		int s = bloom_filter_get(&hashstate->bloomfilter, join_key);
-
-		hashstate->bloomfilter.total_tries++;
-		if (s == 1 && hashTuple->hashvalue == hashvalue)
-		/* END NEWCODE*/
+		if (hashTuple->hashvalue == hashvalue)
 		{
 			TupleTableSlot *inntuple;
 
@@ -2171,7 +2195,6 @@ ExecScanHashBucket(HashJoinState *hjstate,
 				hjstate->hj_CurTuple = hashTuple;
 				return true;
 			}
-			hashstate->bloomfilter.total_hits++;
 		}
 
 		hashTuple = hashTuple->next.unshared;
@@ -2180,6 +2203,7 @@ ExecScanHashBucket(HashJoinState *hjstate,
 	/*
 	 * no match
 	 */
+	hashstate->bloomfilter.total_hits = (hashstate->bloomfilter.total_hits) + 1;//Increment false positive count by 1 since no match.
 	return false;
 }
 
@@ -2201,8 +2225,40 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
+	/* BEGIN NEWCODE */
+	/* Check if the current outer tuple exist in bloom filter*/
+	HashState  *hashstate = (HashState *) innerPlanState(hjstate);
+	hashstate->bloomfilter.total_tries = (hashstate->bloomfilter.total_tries) + 1;
+	List *hashkeys = hashstate->hashkeys;
+	ListCell* hk;
 	uint32_t join_key;
-
+	/* Not exactly sure about this context, but similar to what is done when building table */
+	MemoryContext oldContext;
+	ResetExprContext(econtext);
+	oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+	//loop over hash keys
+	foreach(hk, hashkeys)
+	{
+		ExprState  *keyexpr = (ExprState *) lfirst(hk);
+		Datum		keyval;
+		bool		isNull;
+		/*
+			* Get the join attribute value of the tuple from econtext
+			*/
+		keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
+		if (!isNull) 
+		{
+			join_key = DatumGetInt32(keyval);
+			//Filter returned 0, will never match
+			if(bloom_filter_get(&hashstate->bloomfilter, join_key) == 0)
+			{
+				MemoryContextSwitchTo(oldContext);
+				return false; 
+			}
+		}
+	}
+	/* END NEWCODE */
+	MemoryContextSwitchTo(oldContext);
 	/*
 	 * hj_CurTuple is the address of the tuple last returned from the current
 	 * bucket, or NULL if it's time to start scanning a new bucket.
@@ -2215,21 +2271,7 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 
 	while (hashTuple != NULL)
 	{
-		/* BEGIN NEWCODE */
-		// Check bloom filter
-		HashState  *hashstate = (HashState *) innerPlanState(hjstate);
-		Datum		keyval;
-		bool		isNull;
-		/*
-			* Get the join attribute value of the tuple
-			*/
-		keyval = ExecEvalExpr(hjclauses, econtext, &isNull);
-		if (!isNull) join_key = DatumGetInt32(keyval);
-		int s = bloom_filter_get(&hashstate->bloomfilter, join_key);
-
-		hashstate->bloomfilter.total_tries++;
-		if (s == 1 && hashTuple->hashvalue == hashvalue)
-		/* END NEWCODE*/
+		if (hashTuple->hashvalue == hashvalue)
 		{
 			TupleTableSlot *inntuple;
 
@@ -2244,7 +2286,6 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 				hjstate->hj_CurTuple = hashTuple;
 				return true;
 			}
-			hashstate->bloomfilter.total_hits++;
 		}
 
 		hashTuple = ExecParallelHashNextTuple(hashtable, hashTuple);
@@ -2253,6 +2294,7 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 	/*
 	 * no match
 	 */
+	hashstate->bloomfilter.total_hits = (hashstate->bloomfilter.total_hits) + 1; //Increment false positive counter by 1.
 	return false;
 }
 

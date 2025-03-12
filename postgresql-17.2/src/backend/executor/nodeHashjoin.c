@@ -651,12 +651,27 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				if (parallel)
 				{
 					if (!ExecParallelHashJoinNewBatch(node))
+					{
+						printf("Total misses: %d\n", hashNode->bloomfilter.total_hits);//Print false positive rate
+						printf("Total tries:  %d\n", hashNode->bloomfilter.total_tries);
+						printf("FPR: %.2f\n",(float)hashNode->bloomfilter.total_hits/(float)hashNode->bloomfilter.total_tries );
+						printf("-------------\n");
+						free_custom_bloom_filter(&hashNode->bloomfilter);
 						return NULL;	/* end of parallel-aware join */
+					}
+
 				}
 				else
 				{
 					if (!ExecHashJoinNewBatch(node))
+					{
+						printf("Total misses: %d\n", hashNode->bloomfilter.total_hits);//Print false positive rate
+						printf("Total tries:  %d\n", hashNode->bloomfilter.total_tries);
+						printf("FPR: %.2f\n",(float)hashNode->bloomfilter.total_hits/(float)hashNode->bloomfilter.total_tries );
+						printf("-------------\n");
+						free_custom_bloom_filter(&hashNode->bloomfilter);
 						return NULL;	/* end of parallel-oblivious join */
+					}
 				}
 				node->hj_JoinState = HJ_NEED_NEW_OUTER;
 				break;

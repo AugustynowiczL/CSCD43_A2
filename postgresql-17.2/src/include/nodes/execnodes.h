@@ -73,8 +73,8 @@ typedef Datum (*ExprStateEvalFunc) (struct ExprState *expression,
 
 /* Define size of bloom filter array in bytes and number of functions */
 /* BEGIN NEWCODE */
-#define BLOOM_FILTER_BYTES 1000
-#define BLOOM_FILTER_FUNCTIONS 5
+#define BLOOM_FILTER_BYTES 1500
+#define BLOOM_FILTER_FUNCTIONS 4
 /* END NEWCODE */
 
 /* Bits in ExprState->flags (see also execExpr.h for private flag bits): */
@@ -2758,13 +2758,14 @@ typedef int (*hash_function_t)(struct CustomBloomFilter *bf, uint32_t value);
 typedef struct CustomBloomFilter
 {
 	int 		num_bits;	/* number of bits in bitmap */
-	unsigned int filter[BLOOM_FILTER_BYTES]; /* bitmap */
+	unsigned int *filter; /* bitmap */
 	int			total_tries; /* total number of valid hits */
 	int			total_hits;	/* total number of times the bloom filter is used */
 	hash_function_t	hash_functions[BLOOM_FILTER_FUNCTIONS];/* Array holding all hash functions */
 } CustomBloomFilter;
 
 CustomBloomFilter bloom_filter_init();
+void free_custom_bloom_filter(CustomBloomFilter *bf);
 void bloom_filter_set(CustomBloomFilter *bf, uint32_t value);
 int bloom_filter_get(CustomBloomFilter *bf, uint32_t value);
 int bloom_hashfunc_1(CustomBloomFilter *bf, uint32_t a);
