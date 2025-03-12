@@ -1,0 +1,54 @@
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 10000 AND
+    S.ID > 0;
+    
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 10000 AND
+    S.ID > 3333;
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 10000 AND
+    S.ID > 6666;
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 6666 AND
+    S.ID > 0;
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 6666 AND
+    S.ID > 3333;
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 6666 AND
+    S.ID > 6666;
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 3333 AND
+    S.ID > 0;
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 3333 AND
+    S.ID > 3333;
+
+    EXPLAIN ANALYZE SELECT COUNT(*)
+    FROM Table1 AS R, Table2 AS S
+    WHERE R.ID = S.ID AND
+    R.ID < 3333 AND
+    S.ID > 6666;
