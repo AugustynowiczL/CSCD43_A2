@@ -465,6 +465,52 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				econtext->ecxt_outertuple = outerTupleSlot;
 				node->hj_MatchedOuter = false;
 
+				/* Check for existance of this outer tuple in bloom filter */
+				/* BEGIN NEWCODE */
+				/* Check if the current outer tuple exist in bloom filter*/
+				List *hashkeys = hashNode->hashkeys;
+				ListCell* hk;
+				uint32_t join_key;
+				/* Not exactly sure about this context, but similar to what is done when building hash table */
+				MemoryContext oldContext;
+				ResetExprContext(econtext);
+				oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+				bool t = true;
+				foreach(hk, hashkeys)
+				//loop over hash keys
+				{
+					ExprState  *keyexpr = (ExprState *) lfirst(hk);
+					Datum		keyval;
+					bool		isNull;
+					/*
+						* Get the join attribute value of the tuple from econtext
+						*/
+					keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
+					if (!isNull) 
+					{
+						join_key = DatumGetInt32(keyval);
+						//Filter returned 0, will never match
+						if(bloom_filter_get(&hashNode->bloomfilter, join_key) == 0)
+						{
+
+							MemoryContextSwitchTo(oldContext);
+							//increment true negatives
+							hashNode->bloomfilter.tn++;
+							t = false;
+							break;
+						}
+					}
+				}
+				/* END NEWCODE*/
+				if (t)
+				{
+					MemoryContextSwitchTo(oldContext);
+					hashNode->bloomfilter.total++;
+				}
+				else
+				{
+					continue;
+				}
 				/*
 				 * Find the corresponding bucket for this tuple in the main
 				 * hash table or skew hash table.
@@ -582,7 +628,15 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 						continue;
 
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
+					{
+						//BEGIN NEWCODE
+						// hard to find false positive with this giant switch statement and will be a lot of places
+						// to increment. Easier to just find true positives and just get false positive using it
+						hashNode->bloomfilter.tp++; //increment true positive
+						//END NEWCODE
 						return ExecProject(node->js.ps.ps_ProjInfo);
+					}
+
 					else
 						InstrCountFiltered2(node, 1);
 				}
@@ -609,7 +663,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 					econtext->ecxt_innertuple = node->hj_NullInnerTupleSlot;
 
 					if (otherqual == NULL || ExecQual(otherqual, econtext))
+					{
 						return ExecProject(node->js.ps.ps_ProjInfo);
+						//BEGIN NEWCODE
+						hashNode->bloomfilter.tp++; //increment true positive
+						//END NEWCODE
+					}
 					else
 						InstrCountFiltered2(node, 1);
 				}
@@ -638,7 +697,12 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				econtext->ecxt_outertuple = node->hj_NullOuterTupleSlot;
 
 				if (otherqual == NULL || ExecQual(otherqual, econtext))
+				{
 					return ExecProject(node->js.ps.ps_ProjInfo);
+					//BEGIN NEWCODE
+					hashNode->bloomfilter.tp++; //increment true positive
+					//END NEWCODE
+				}
 				else
 					InstrCountFiltered2(node, 1);
 				break;
@@ -652,11 +716,17 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (!ExecParallelHashJoinNewBatch(node))
 					{
-						printf("Total misses: %d\n", hashNode->bloomfilter.total_hits);//Print false positive rate
-						printf("Total tries:  %d\n", hashNode->bloomfilter.total_tries);
-						printf("FPR: %.2f\n",(float)hashNode->bloomfilter.total_hits/(float)hashNode->bloomfilter.total_tries );
-						printf("-------------\n");
+						// BEGIN NEWCODE 
+						//stats
+						printf("True positive: %d\n", hashNode->bloomfilter.tp);
+						printf("True negative:  %d\n", hashNode->bloomfilter.tn);
+						printf("Total positives:  %d\n", hashNode->bloomfilter.total);
+						int fp = hashNode->bloomfilter.total - hashNode->bloomfilter.tp;
+						printf("False positives:  %d\n", fp);
+						printf("FP: %.2f\n", (float)fp / (float)((float)fp + (float)hashNode->bloomfilter.tn));
 						free_custom_bloom_filter(&hashNode->bloomfilter);
+						printf("-------------\n");
+						// END NEWCODE
 						return NULL;	/* end of parallel-aware join */
 					}
 
@@ -665,11 +735,17 @@ ExecHashJoinImpl(PlanState *pstate, bool parallel)
 				{
 					if (!ExecHashJoinNewBatch(node))
 					{
-						printf("Total misses: %d\n", hashNode->bloomfilter.total_hits);//Print false positive rate
-						printf("Total tries:  %d\n", hashNode->bloomfilter.total_tries);
-						printf("FPR: %.2f\n",(float)hashNode->bloomfilter.total_hits/(float)hashNode->bloomfilter.total_tries );
-						printf("-------------\n");
+						//BEGIN NEWCODE
+						//stats
+						printf("True positive: %d\n", hashNode->bloomfilter.tp);
+						printf("True negative:  %d\n", hashNode->bloomfilter.tn);
+						printf("Total positives:  %d\n", hashNode->bloomfilter.total);
+						int fp = hashNode->bloomfilter.total - hashNode->bloomfilter.tp;
+						printf("False positives:  %d\n", fp);
+						printf("FP: %.2f\n", (float)fp / (float)((float)fp + (float)hashNode->bloomfilter.tn));
 						free_custom_bloom_filter(&hashNode->bloomfilter);
+						printf("-------------\n");
+						//END NEWCODE
 						return NULL;	/* end of parallel-oblivious join */
 					}
 				}

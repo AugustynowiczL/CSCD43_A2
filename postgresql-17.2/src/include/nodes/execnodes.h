@@ -73,7 +73,7 @@ typedef Datum (*ExprStateEvalFunc) (struct ExprState *expression,
 
 /* Define size of bloom filter array in bytes and number of functions */
 /* BEGIN NEWCODE */
-#define BLOOM_FILTER_BYTES 1500
+#define BLOOM_FILTER_BYTES 500
 #define BLOOM_FILTER_FUNCTIONS 4
 /* END NEWCODE */
 
@@ -2759,8 +2759,9 @@ typedef struct CustomBloomFilter
 {
 	int 		num_bits;	/* number of bits in bitmap */
 	unsigned int *filter; /* bitmap */
-	int			total_tries; /* total number of valid hits */
-	int			total_hits;	/* total number of times the bloom filter is used */
+	int			tn; /* true negative */
+	int			total;	/* total positive counter,used to calculate false positive */
+	int 		tp; /* true positive counter*/
 	hash_function_t	hash_functions[BLOOM_FILTER_FUNCTIONS];/* Array holding all hash functions */
 } CustomBloomFilter;
 

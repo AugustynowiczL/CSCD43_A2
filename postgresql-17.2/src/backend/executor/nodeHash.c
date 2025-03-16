@@ -86,14 +86,18 @@ static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
  */
 int bloom_hashfunc_1(CustomBloomFilter *bf, uint32_t input) //DJB2 hash
 {
+	
 	uint32_t hash = 5381;
 	hash = ((hash << 5) + hash) + (input & 0xFF);  // Combine the input as a byte
 	hash = ((hash << 5) + hash) + ((input >> 8) & 0xFF); // Handle the next byte
 	return hash % bf->num_bits;
+
+	
 }
 
 int bloom_hashfunc_2(CustomBloomFilter* bf, uint32_t input) // FNV-1a hash
 {
+	
 	uint32_t hash = 0x811c9dc5;  // FNV-1a offset basis
 	hash ^= (input & 0xFF);      // Process the lowest byte
 	hash *= 0x01000193;          // FNV-1a prime
@@ -108,6 +112,7 @@ int bloom_hashfunc_2(CustomBloomFilter* bf, uint32_t input) // FNV-1a hash
 
 int bloom_hashfunc_3(CustomBloomFilter* bf, uint32_t input) //XOR SHIFT hash
 {
+	
 	input ^= input >> 21;
 	input ^= input << 35;
 	input ^= input >> 4;
@@ -128,7 +133,8 @@ int bloom_hashfunc_4(CustomBloomFilter* bf, uint32 input) //rotate xor hash
 CustomBloomFilter bloom_filter_init(HashState* node) 
 {
 	CustomBloomFilter bf;
-	int bytes = ((((int)node->ps.plan->plan_rows) * BLOOM_FILTER_FUNCTIONS)/0.7) / 8;
+	//optimal size formula m = ceil((n * log(p)) / log(1 / pow(2, log(2))));  https://hur.st/bloomfilter/?n=8000&p=1.0E-2&m=&k=4
+	int bytes = (((int)node->ps.plan->plan_rows) * 10.522) / 8; //10,522 is the calculcated ratio given #hashfunctions = 4 and probability = 0.01
 	int arr_size = bytes / 4;
 	bf.num_bits = arr_size * 32;
 	bf.filter = (unsigned int *)malloc(arr_size * sizeof(unsigned int));
@@ -137,9 +143,10 @@ CustomBloomFilter bloom_filter_init(HashState* node)
 		printf("BF Memory allocation failed\n");
 		exit(1);
 	}
-	printf("Initializaing bf with: %d\n", bf.num_bits);
-	bf.total_tries = 0;
-	bf.total_hits = 0;
+	printf("Initializaing bf with: %d\n", bytes);
+	bf.tp = 0;
+	bf.total = 0;
+	bf.tn = 0;
 
 	for (int i = 0; i < arr_size; i++)
 	{
@@ -155,6 +162,18 @@ CustomBloomFilter bloom_filter_init(HashState* node)
 /* Free bf structure */
 void free_custom_bloom_filter(CustomBloomFilter *bf)
 {
+	//count bloom filter flipped bits for sanity
+	int count = 0;
+	for (size_t i = 0; i < bf->num_bits/32; i++)
+	{
+		unsigned int cur = bf->filter[i];
+		while (cur)
+		{
+			count+= cur &1;
+			cur >>= 1;
+		}
+	}
+	printf("Number of 1s in filter: %d\n", count);
 	free(bf->filter);
 	bf->filter = NULL;
 }
@@ -164,7 +183,6 @@ void bloom_filter_set(CustomBloomFilter *bf, uint32_t value)
 	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
 	{
 		int hash = bf->hash_functions[i](bf, value);
-		hash = hash % bf->num_bits;
 		/* hash /32 gets specific integer region*/
 		/* 1U << hash % 32 gets specific bit in 32 bit integer region*/
 		bf->filter[hash/32] |= (1U << hash % 32);
@@ -176,7 +194,6 @@ int bloom_filter_get(CustomBloomFilter *bf, uint32_t value)
 	for (int i = 0; i < BLOOM_FILTER_FUNCTIONS; i++)
 	{
 		int hash = bf->hash_functions[i](bf, value);
-		hash = hash % bf->num_bits;
 		/* hash /32 gets specific integer region*/
 		/* 1U << hash % 32 gets specific bit in 32 bit integer region*/
 		if ((bf->filter[hash/32] & (1U << hash % 32)) == 0)
@@ -2129,41 +2146,6 @@ ExecScanHashBucket(HashJoinState *hjstate,
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
-	/* BEGIN NEWCODE */
-	/* Check if the current outer tuple exist in bloom filter*/
-	HashState  *hashstate = (HashState *) innerPlanState(hjstate);
-	hashstate->bloomfilter.total_tries = (hashstate->bloomfilter.total_tries) + 1; //Increment bloom filter use by one, used for false positive
-	List *hashkeys = hashstate->hashkeys;
-	ListCell* hk;
-	uint32_t join_key;
-	/* Not exactly sure about this context, but similar to what is done when building hash table */
-	MemoryContext oldContext;
-	ResetExprContext(econtext);
-	oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
-	foreach(hk, hashkeys)
-	//loop over hash keys
-	{
-		ExprState  *keyexpr = (ExprState *) lfirst(hk);
-		Datum		keyval;
-		bool		isNull;
-		/*
-			* Get the join attribute value of the tuple from econtext
-			*/
-		keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
-		if (!isNull) 
-		{
-			join_key = DatumGetInt32(keyval);
-			//Filter returned 0, will never match
-			if(bloom_filter_get(&hashstate->bloomfilter, join_key) == 0)
-			{
-
-				MemoryContextSwitchTo(oldContext);
-				return false; 
-			}
-		}
-	}
-	/* END NEWCODE*/
-	MemoryContextSwitchTo(oldContext);
 	/*
 	 * hj_CurTuple is the address of the tuple last returned from the current
 	 * bucket, or NULL if it's time to start scanning a new bucket.
@@ -2203,7 +2185,6 @@ ExecScanHashBucket(HashJoinState *hjstate,
 	/*
 	 * no match
 	 */
-	hashstate->bloomfilter.total_hits = (hashstate->bloomfilter.total_hits) + 1;//Increment false positive count by 1 since no match.
 	return false;
 }
 
@@ -2225,40 +2206,6 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 	HashJoinTable hashtable = hjstate->hj_HashTable;
 	HashJoinTuple hashTuple = hjstate->hj_CurTuple;
 	uint32		hashvalue = hjstate->hj_CurHashValue;
-	/* BEGIN NEWCODE */
-	/* Check if the current outer tuple exist in bloom filter*/
-	HashState  *hashstate = (HashState *) innerPlanState(hjstate);
-	hashstate->bloomfilter.total_tries = (hashstate->bloomfilter.total_tries) + 1;
-	List *hashkeys = hashstate->hashkeys;
-	ListCell* hk;
-	uint32_t join_key;
-	/* Not exactly sure about this context, but similar to what is done when building table */
-	MemoryContext oldContext;
-	ResetExprContext(econtext);
-	oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
-	//loop over hash keys
-	foreach(hk, hashkeys)
-	{
-		ExprState  *keyexpr = (ExprState *) lfirst(hk);
-		Datum		keyval;
-		bool		isNull;
-		/*
-			* Get the join attribute value of the tuple from econtext
-			*/
-		keyval = ExecEvalExpr(keyexpr, econtext, &isNull);
-		if (!isNull) 
-		{
-			join_key = DatumGetInt32(keyval);
-			//Filter returned 0, will never match
-			if(bloom_filter_get(&hashstate->bloomfilter, join_key) == 0)
-			{
-				MemoryContextSwitchTo(oldContext);
-				return false; 
-			}
-		}
-	}
-	/* END NEWCODE */
-	MemoryContextSwitchTo(oldContext);
 	/*
 	 * hj_CurTuple is the address of the tuple last returned from the current
 	 * bucket, or NULL if it's time to start scanning a new bucket.
@@ -2294,7 +2241,6 @@ ExecParallelScanHashBucket(HashJoinState *hjstate,
 	/*
 	 * no match
 	 */
-	hashstate->bloomfilter.total_hits = (hashstate->bloomfilter.total_hits) + 1; //Increment false positive counter by 1.
 	return false;
 }
 
